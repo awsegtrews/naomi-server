@@ -1,0 +1,10 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+groq>=0.30
+anthropic>=1.0
+edge-tts>=7.0
+miniaudio>=1.60
+numpy>=2.0
+websockets>=14
+tzdata
+huggingface_hub>=0.30
