@@ -159,6 +159,7 @@ async def screen_socket(ws: WebSocket):
         await ws.close(code=4400)
         return
     if not SCREEN_KEY or not _token_ok(str(first.get("key", "")), SCREEN_KEY):
+        await ws.send_text('{"t": "denied"}')  # явно: проксі Render може затримати сам код закриття
         await ws.close(code=4401)
         return
     if "timers" not in SCREENS.state:

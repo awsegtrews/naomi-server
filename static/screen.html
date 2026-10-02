@@ -343,8 +343,10 @@ function connect() {
     ws.send(JSON.stringify({ key }));
     ping = setInterval(() => { if (ws.readyState === 1) ws.send("{}"); }, 50000);
   };
+  let denied = false;
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
+    if (m.t === "denied") { denied = true; return ws.close(); }
     if (m.t !== "assets") return handle(m);
     if (pageVer && m.page !== pageVer) return location.reload();  // сторінку оновили на сервері
     pageVer = m.page; A = m; setTheme(theme); attempt = 0;
@@ -354,7 +356,7 @@ function connect() {
   ws.onclose = (e) => {
     clearInterval(ping);
     $("dot").className = "";
-    if (e.code === 4401) { notice("Ключ екрана не підходить — перевір адресу."); setTimeout(connect, 60000); return; }
+    if (denied || e.code === 4401) { notice("Ключ екрана не підходить — перевір адресу."); setTimeout(connect, 60000); return; }
     setTimeout(connect, Math.min(30000, 2000 * ++attempt));  // сервер прокидається або перезапускається
   };
 }
