@@ -1,16 +1,28 @@
-"""Звук: розпаковка µ-law від Cardputer, WAV для Whisper, голос Наомі (Edge TTS)."""
+"""Звук: розпаковка µ-law від Cardputer, WAV для Whisper, голос Наомі по реченнях.
+
+Голос по реченнях — Google Chirp 3 HD (той самий Leda, що й живий голос Gemini, без ліміту на добу),
+а без його ключа чи при збої — Edge (Поліна). Живий голос з емоціями — у tts_gemini.py.
+"""
+import base64
 import io
+import logging
 import os
 import re
+import time
 import wave
 
 import edge_tts
+import httpx
 import miniaudio
 import numpy as np
 
+log = logging.getLogger("naomi.audio")
 SAMPLE_RATE = 16000
 VOICE = os.environ.get("NAOMI_VOICE", "uk-UA-PolinaNeural")
 VOICE_RATE = os.environ.get("NAOMI_VOICE_RATE", "+8%")
+CHIRP_KEY = os.environ.get("GOOGLE_TTS_KEY", "")
+CHIRP_VOICE = os.environ.get("NAOMI_CHIRP_VOICE", "uk-UA-Chirp3-HD-Leda")
+_chirp_resting = 0.0  # після помилки якийсь час не пробуємо
 
 
 def _mulaw_table() -> np.ndarray:
@@ -44,12 +56,38 @@ _INTERJECTIONS = [(re.compile(r"\b([Хх])м+\b"), lambda m: "Гм" if m.group(1
                   (re.compile(r"\b([Пп])ф+\b"), lambda m: "Тю" if m.group(1) == "П" else "тю")]
 
 
+async def _chirp(text: str) -> bytes | None:
+    """Google Cloud Chirp 3 HD -> PCM 16 кГц; None — немає ключа або збій (тоді говорить Edge)."""
+    global _chirp_resting
+    if not CHIRP_KEY or time.time() < _chirp_resting:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post("https://texttospeech.googleapis.com/v1/text:synthesize",
+                                  headers={"x-goog-api-key": CHIRP_KEY}, json={
+                                      "input": {"text": text},
+                                      "voice": {"languageCode": CHIRP_VOICE[:5], "name": CHIRP_VOICE},
+                                      "audioConfig": {"audioEncoding": "LINEAR16", "sampleRateHertz": SAMPLE_RATE}})
+        if r.status_code != 200:
+            _chirp_resting = time.time() + (3600 if r.status_code in (400, 401, 403) else 120)
+            log.warning("Chirp %s: %s", r.status_code, r.text[:300])
+            return None
+        with wave.open(io.BytesIO(base64.b64decode(r.json()["audioContent"]))) as w:  # LINEAR16 приходить з WAV-заголовком
+            return w.readframes(w.getnframes())
+    except (httpx.HTTPError, wave.Error, KeyError, ValueError) as e:
+        log.warning("Chirp: %s", type(e).__name__)
+        return None
+
+
 async def synthesize(text: str) -> bytes:
     """Текст -> сирий PCM 16 біт, 16 кГц, моно (саме те, що грає Cardputer)."""
     if not text.strip():
         return b""
     for pattern, repl in _INTERJECTIONS:
         text = pattern.sub(repl, text)
+    pcm = await _chirp(text)
+    if pcm is not None:
+        return pcm
     mp3 = bytearray()
     async for chunk in edge_tts.Communicate(text, VOICE, rate=VOICE_RATE).stream():
         if chunk["type"] == "audio":
