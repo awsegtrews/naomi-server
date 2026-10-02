@@ -79,7 +79,8 @@ def _token_ok(given: str | None, expected: str) -> bool:
 
 @app.get("/")
 def status():
-    return {"name": "Naomi", "pc_online": home.online("pc"), "bridge_online": home.online("bridge")}
+    return {"name": "Naomi", "pc_online": home.online("pc"), "bridge_online": home.online("bridge"),
+            "device_online": DeviceSession.current is not None}
 
 
 @app.websocket("/device")
