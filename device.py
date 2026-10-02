@@ -27,6 +27,7 @@ from fastapi import WebSocket
 from audio import SAMPLE_RATE, mulaw_to_pcm16, normalize, pcm16_to_mulaw, pcm16_to_wav, synthesize
 from brains import CITY, OWNER_VOC, Brain
 from radio import STATIONS, RadioStream
+from screens import SCREENS, envelope
 from weather import short as short_weather
 from pc_link import HomeLink
 from textutil import clean
@@ -107,6 +108,7 @@ class DeviceSession:
 
     def push_timers(self) -> None:
         items = [{"due": int(i["due"]), "text": i["text"]} for i in self.brain.reminders.upcoming()]
+        SCREENS.send({"t": "timers", "items": items}, remember="timers")
         asyncio.get_running_loop().create_task(self.send({"t": "timers", "items": items}))
 
     async def widget_loop(self) -> None:
@@ -115,6 +117,7 @@ class DeviceSession:
             try:
                 temp, desc = await short_weather(CITY)
                 await self.send({"t": "widget", "weather": temp, "desc": desc})
+                SCREENS.send({"t": "widget", "weather": temp, "desc": desc}, remember="widget")
             except Exception as e:
                 log.debug("віджет погоди: %s", e)
             await asyncio.sleep(1800)
@@ -122,6 +125,7 @@ class DeviceSession:
     async def play_radio(self, title: str) -> None:
         log.info("радіо: %s", title)
         await self.send({"t": "say", "text": f"Грає {title}. Щоб вимкнути — натисни G0.", "mood": "happy"})
+        SCREENS.send({"t": "say", "text": f"Грає {title}", "mood": "happy", "radio": True}, remember="say")
         stream = RadioStream(STATIONS[title])
         await self.send({"t": "audio", "bytes": 0, "rate": SAMPLE_RATE})
         self.sent = self.acked = 0
@@ -130,6 +134,7 @@ class DeviceSession:
                 chunk = await asyncio.to_thread(stream.get, 15)
                 if chunk is None:
                     break
+                SCREENS.send({"t": "env", "env": envelope(mulaw_to_pcm16(chunk))})
                 for i in range(0, len(chunk), FRAME):
                     while self.sent - self.acked >= WINDOW:
                         self.acked_event.clear()
@@ -139,6 +144,7 @@ class DeviceSession:
                     self.sent += len(part)
         finally:
             stream.close()
+            SCREENS.send({"t": "end"})
         await self.send({"t": "end"})
 
     async def on_battery(self, level: int) -> None:
@@ -176,6 +182,10 @@ class DeviceSession:
 
     async def send_cmd(self, cmd: dict) -> None:
         await self.send({"t": "cmd", **cmd})
+        if "theme" in cmd:
+            SCREENS.send({"t": "theme", "theme": cmd["theme"]}, remember="theme")
+        if "emote" in cmd:
+            SCREENS.send({"t": "emote", "emote": cmd["emote"]})
 
     def busy(self) -> bool:
         return self.recording or (self.task is not None and not self.task.done())
@@ -189,6 +199,7 @@ class DeviceSession:
 
     async def alarm(self, text: str) -> None:
         await self.send({"t": "alarm", "text": text})
+        SCREENS.send({"t": "alarm", "text": text})
         await asyncio.sleep(1.6)  # пристрій грає мелодію-сигнал
         try:
             await self.speak("Нагадую: " + text, "happy")
@@ -204,6 +215,7 @@ class DeviceSession:
             return
         if t == "text":  # написали з клавіатури Cardputer
             await self.cancel()
+            SCREENS.send({"t": "heard", "text": clean(str(m.get("text", "")))[:500]})
             self.task = asyncio.create_task(self.answer(str(m.get("text", ""))[:500], typed=True))
             return
         if t == "mute":
@@ -211,6 +223,7 @@ class DeviceSession:
             return
         if t == "hello":
             self.mute = bool(m.get("mute", False))
+            SCREENS.send({"t": "theme", "theme": int(m.get("theme", 0))}, remember="theme")
             global _last_greeting
             self.brain.device_state = {k: m[k] for k in ("volume", "bright", "theme", "battery") if k in m}
             self.push_timers()
@@ -227,11 +240,14 @@ class DeviceSession:
             await self.cancel()
             self.audio.clear()
             self.recording = True
+            SCREENS.send({"t": "listen"})
         elif t == "stop":
             self.recording = False
+            SCREENS.send({"t": "think"})
             self.task = asyncio.create_task(self.process(bytes(self.audio)))
         elif t == "cancel":
             self.recording = False
+            SCREENS.send({"t": "idle"})
             await self.cancel()
         elif t == "reset":
             self.brain.reset()
@@ -260,6 +276,7 @@ class DeviceSession:
                 await self.speak("Я не розчула, повтори, будь ласка.")
                 return
             await self.send({"t": "heard", "text": clean(heard)})
+            SCREENS.send({"t": "heard", "text": clean(heard)})
             await self.answer(heard)
         except asyncio.CancelledError:
             raise
@@ -298,6 +315,7 @@ class DeviceSession:
 
     async def _air(self, region: str, active: bool) -> None:
         await self.send({"t": "air", "on": active, "region": region})
+        SCREENS.send({"t": "air", "on": active, "region": region}, remember="air")
         await asyncio.sleep(3.2 if active else 1.2)  # сирена / м'який сигнал на пристрої
         text = (f"Увага! Повітряна тривога: {region}. Будь ласка, пройди в укриття." if active
                 else f"Відбій повітряної тривоги: {region}.")
@@ -310,8 +328,10 @@ class DeviceSession:
         """Озвучує по реченнях: перше речення звучить, поки синтезуються наступні."""
         text = clean(text) or "…"
         log.info("говорю [%s]: %s", mood, text)
+        SCREENS.send({"t": "say", "text": text, "mood": mood}, remember="say")
         if self.mute and not force_voice:  # тихий режим — лише текст
             await self.send({"t": "say", "text": text, "mood": mood, "silent": True})
+            SCREENS.send({"t": "end"})
             return
         await self.send({"t": "say", "text": text, "mood": mood})
         parts = [p for p in re.split(r"(?<=[.!?…])\s+", text) if p.strip()] or [text]
@@ -320,8 +340,10 @@ class DeviceSession:
         await self.send({"t": "audio", "bytes": int(len(text) * SAMPLE_RATE / 14), "rate": SAMPLE_RATE})
         self.sent = self.acked = 0
         try:
-            for job in jobs:
-                ulaw = pcm16_to_mulaw(np.frombuffer(await job, dtype="<i2"))
+            for part, job in zip(parts, jobs):
+                pcm = np.frombuffer(await job, dtype="<i2")
+                SCREENS.send({"t": "env", "env": envelope(pcm), "text": part})
+                ulaw = pcm16_to_mulaw(pcm)
                 if job is jobs[-1]:
                     await self.send({"t": "total", "bytes": self.sent + len(ulaw)})
                 for i in range(0, len(ulaw), FRAME):
@@ -335,4 +357,5 @@ class DeviceSession:
             for job in jobs:
                 job.cancel()
         await self.send({"t": "end"})
+        SCREENS.send({"t": "end"})
         await self.send({"t": "status", "pc": self.home.online("pc")})

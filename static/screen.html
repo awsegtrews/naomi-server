@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Наомі</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root { --paper: #fbeedd; --ink: #3a2c38; --acc: #2b7079; --extra: #e7d6c0; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--paper); cursor: none; }
+  body { font-family: "Inter", "Segoe UI", "DejaVu Sans", sans-serif; color: var(--ink); }
+  #stage { position: absolute; left: 50%; top: 50%; width: 800px; height: 480px; transform-origin: 50% 50%; }
+
+  #frame { position: absolute; left: 22px; top: 33px; width: 343px; height: 409px; border: 3px solid var(--ink);
+           background: var(--paper); box-shadow: 6px 6px 0 var(--extra); }
+  #frame.air { border-color: #c62828; }
+  #portrait { position: absolute; left: 2px; top: 2px; width: 339px; height: 405px; image-rendering: pixelated; }
+  #zzz { position: absolute; right: 16px; top: 12px; font-weight: 700; font-size: 30px; letter-spacing: 4px;
+         opacity: 0; transition: opacity 2s; }
+  #zzz.on { opacity: 1; animation: float 3s ease-in-out infinite; }
+  @keyframes float { 50% { transform: translateY(-8px); } }
+
+  #right { position: absolute; left: 392px; top: 30px; width: 386px; height: 420px; }
+  #clock { font-weight: 700; font-size: 92px; line-height: 1; letter-spacing: -3px; font-variant-numeric: tabular-nums; }
+  #date { font-weight: 500; font-size: 21px; color: var(--acc); margin-top: 8px; }
+  #weather { font-weight: 500; font-size: 22px; height: 28px; margin-top: 4px; white-space: nowrap; overflow: hidden;
+             text-overflow: ellipsis; }
+  #rule { height: 3px; background: var(--ink); margin: 14px 0 12px; }
+  #row { display: flex; justify-content: space-between; align-items: baseline; height: 22px; }
+  #who { font-weight: 700; font-size: 16px; letter-spacing: 1.5px; color: var(--acc); }
+  #status { font-weight: 500; font-size: 16px; opacity: .7; }
+  #text, #measure { width: 386px; font-weight: 500; font-size: 25px; line-height: 1.28; overflow-wrap: anywhere; }
+  #text { height: 166px; margin-top: 6px; overflow: hidden; }
+  #measure { position: absolute; left: 0; top: 0; visibility: hidden; }
+  #foot { position: absolute; left: 0; bottom: 0; width: 100%; font-weight: 500; font-size: 18px; color: var(--acc);
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  #alert { display: none; position: absolute; left: 0; top: 0; width: 800px; height: 30px; line-height: 30px;
+           text-align: center; background: #c62828; color: #fff; font-weight: 700; font-size: 17px; }
+  #alert.on { display: block; animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { background: #8e1b1b; } }
+  #dot { position: absolute; right: 6px; bottom: 6px; width: 8px; height: 8px; border-radius: 50%;
+         background: #c62828; opacity: .8; }
+  #dot.on { background: var(--acc); opacity: .35; }
+  #night { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity 3s; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="frame"><canvas id="portrait" width="113" height="135"></canvas><div id="zzz">Z z z</div></div>
+  <div id="right">
+    <div id="clock">--:--</div>
+    <div id="date"></div>
+    <div id="weather"></div>
+    <div id="rule"></div>
+    <div id="row"><span id="who"></span><span id="status"></span></div>
+    <div id="text"></div>
+    <div id="foot"></div>
+    <div id="measure"></div>
+  </div>
+  <div id="alert"></div>
+  <div id="dot"></div>
+</div>
+<div id="night"></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const DAYS = ["неділя", "понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота"];
+const MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня",
+                "жовтня", "листопада", "грудня"];
+const FRAME_MS = 40;  // крок «ритму» голосу з сервера (25 значень на секунду)
+const LEAD_MS = 150;  // приблизно стільки звук летить до Cardputer і починає грати
+const TEXT_H = 166;
+
+// Сцена 800×480 масштабується під будь-який екран (рамка, телефон, монітор)
+let fitted = "";
+function fit() {
+  if (fitted === innerWidth + "x" + innerHeight) return;
+  fitted = innerWidth + "x" + innerHeight;
+  const k = Math.min(innerWidth / 800, innerHeight / 480);
+  $("stage").style.transform = `translate(-50%, -50%) scale(${k})`;
+}
+addEventListener("resize", fit);
+setInterval(fit, 1000);  // деякі браузери-кіоски не надсилають resize після повороту/зміни роздільності
+fit();
+
+// ------------------------------------------------ портрет: ті самі пікселі й латки, що на Cardputer
+let A = null, theme = 0, pal = null, base = null, img = null, shown = "";
+const ctx = $("portrait").getContext("2d");
+
+function hexRgb(h) { return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); }
+
+function paint(data, p) {
+  for (let y = 0; y < p.h; y++) {
+    const row = p.px[y];
+    let o = ((p.y + y) * A.w + p.x) * 4;
+    for (let x = 0; x < p.w; x++, o += 4) {
+      const c = pal[row.charCodeAt(x) - 48];
+      data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+    }
+  }
+}
+
+function setTheme(i) {
+  theme = i;
+  if (!A) return;
+  const t = A.themes[((i % A.themes.length) + A.themes.length) % A.themes.length].colors;
+  pal = t.map(hexRgb);
+  ["--paper", "--ink", "--acc", "--extra"].forEach((v, k) => document.documentElement.style.setProperty(v, t[k]));
+  base = new ImageData(A.w, A.h);
+  paint(base.data, { x: 0, y: 0, w: A.w, h: A.h, px: A.portrait });
+  img = new ImageData(A.w, A.h);
+  shown = "";
+}
+
+function render(eyes, mouth, hand) {
+  const key = eyes + "/" + mouth + "/" + hand;
+  if (!A || key === shown) return;
+  shown = key;
+  img.data.set(base.data);
+  if (hand >= 0) paint(img.data, A.hand[hand]);
+  if (eyes === "wink") { paint(img.data, A.eyes.open[0]); paint(img.data, A.eyes.closed[1]); }
+  else { paint(img.data, A.eyes[eyes][0]); paint(img.data, A.eyes[eyes][1]); }
+  paint(img.data, A.mouth[mouth]);
+  ctx.putImageData(img, 0, 0);
+}
+
+// ------------------------------------------------ обличчя: моргання, настрій, рот, «поправляє волосся»
+const F = { mood: "neutral", until: 0, blinking: false, blinkStart: 0, nextBlink: 2500, winkUntil: 0,
+            hair: -1, hairNext: 0, hand: -1, lastHair: -1e9, mouth: "closed", mouthAt: 0 };
+const HAIR = [[0, 80], [1, 80], [2, 130], [3, 170], [4, 200], [3, 150], [4, 600], [2, 110], [1, 80], [0, 80], [-1, 0]];
+const MOODS = { happy: "happy", sad: "worried", thinking: "thinking" };
+let sleeping = false;
+
+function setMood(m, hold = 0) { F.mood = m; F.until = hold ? performance.now() + hold : 0; }
+function hairFix() { F.hair = 0; F.hairNext = 0; F.lastHair = performance.now(); }
+
+function faceTick(now, talking, level) {
+  if (F.until && now > F.until) { F.mood = "neutral"; F.until = 0; }
+  const mood = sleeping ? "sleep" : F.mood;
+  let eyes = mood === "thinking" || mood === "worried" ? "half"
+    : mood === "happy" ? "happy" : mood === "sleep" ? "closed" : "open";
+  if (eyes === "open" || eyes === "half") {
+    if (!F.blinking && now >= F.nextBlink) { F.blinking = true; F.blinkStart = now; }
+    if (F.blinking) {
+      const t = now - F.blinkStart;
+      if (t < 50) eyes = "half";
+      else if (t < 140) eyes = "closed";
+      else if (t < 190) eyes = "half";
+      else {
+        F.blinking = false;
+        let gap = mood === "listening" ? 4000 + Math.random() * 4000 : 2200 + Math.random() * 3800;
+        if (Math.random() < 1 / 6) gap = 260;  // іноді подвійне моргання
+        F.nextBlink = now + gap;
+      }
+    }
+  } else F.blinking = false;
+  if (now < F.winkUntil) eyes = "wink";
+
+  let mouth = "closed";
+  if (talking) {
+    const want = level < 5 ? "closed" : level < 14 ? "open1" : level < 30 ? "open2" : "open3";
+    if (want !== F.mouth && now - F.mouthAt > 55) { F.mouth = want; F.mouthAt = now; }
+    mouth = F.mouth;
+  } else if (mood === "happy" || now < F.winkUntil) mouth = "smile";
+
+  if (F.hair >= 0 && now >= F.hairNext) {
+    const [frame, ms] = HAIR[F.hair];
+    F.hand = frame;
+    if (frame < 0) F.hair = -1; else { F.hairNext = now + ms; F.hair++; }
+  }
+  render(eyes, mouth, F.hand);
+}
+
+// ------------------------------------------------ мова: черга речень з «ритмом» голосу, субтитри в такт
+const Q = { segs: [], done: "", end: 0, talking: false, ending: false };
+const S = { mode: "idle", who: "НАОМІ", text: "Підключаюсь…", mood: "calm", heard: "", pending: null, size: 25 };
+
+function resetSpeech() { Q.segs = []; Q.done = ""; Q.end = 0; Q.talking = false; Q.ending = false; }
+
+function addSeg(env, text) {
+  const now = performance.now();
+  if (text == null && Q.end - now > 3000) return;  // радіо: не відставати від звуку
+  if (!Q.talking) { Q.talking = true; setMood(MOODS[S.mood] || "neutral"); }
+  const t0 = Math.max(now + LEAD_MS, Q.end);
+  Q.segs.push({ t0, env, text });
+  Q.end = t0 + env.length * FRAME_MS;
+}
+
+function finishSpeech() {
+  resetSpeech();
+  S.mode = "idle";
+  setMood(S.mood === "sad" ? "worried" : "happy", 1600);
+}
+
+function speechTick(now) {
+  while (Q.segs.length && now >= Q.segs[0].t0 + Q.segs[0].env.length * FRAME_MS) {
+    const s = Q.segs.shift();
+    if (s.text) Q.done += s.text + " ";
+  }
+  let level = 0, typed = Q.done, radio = false;
+  const s = Q.segs[0];
+  if (s) {
+    radio = s.text == null;
+    const i = Math.floor((now - s.t0) / FRAME_MS);
+    if (i >= 0) {
+      level = s.env[i] || 0;
+      if (s.text) typed += s.text.slice(0, Math.ceil(s.text.length * (i + 1) / s.env.length));
+    }
+  }
+  if (Q.talking && now >= Q.end + (Q.ending ? 150 : 20000)) finishSpeech();  // кінець (або зник зв'язок)
+  return { level, typed: radio ? null : typed.trim() };
+}
+
+function fitSize(t) {
+  const m = $("measure");
+  m.textContent = t;
+  for (let size = 25; size > 16; size--) {
+    m.style.fontSize = size + "px";
+    if (m.scrollHeight <= TEXT_H) return size;
+  }
+  return 16;
+}
+
+const out = { who: null, text: null, status: null, size: null };
+function show(who, text, status, size, bottom) {
+  const el = $("text");
+  if (out.who !== who) $("who").textContent = out.who = who;
+  if (out.status !== status) $("status").textContent = out.status = status;
+  if (out.size !== size) el.style.fontSize = (out.size = size) + "px";
+  if (out.text !== text) {
+    el.textContent = out.text = text;
+    el.scrollTop = bottom ? el.scrollHeight : 0;
+  }
+}
+
+function textTick(now, typed) {
+  const dots = ".".repeat(Math.floor(now / 400) % 4);
+  if (S.mode === "listen") show("ТИ", "Слухаю" + dots, "", 25, false);
+  else if (S.mode === "think") show("ТИ", S.heard || "…", "думаю" + dots, S.heard ? S.heardSize : 25, false);
+  else if (Q.talking && typed != null) show(S.who, typed, "", S.size, true);
+  else show(S.who, S.text, "", S.size, false);
+}
+
+// ------------------------------------------------ годинник, нагадування, нічний режим
+let timers = [], lastActive = Date.now();
+
+function clockTick() {
+  const d = new Date();
+  $("clock").textContent = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  $("date").textContent = `${DAYS[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  const next = timers.filter((t) => t.due * 1000 > Date.now()).sort((a, b) => a.due - b.due)[0];
+  let foot = "";
+  if (next) {
+    const left = Math.round(next.due - Date.now() / 1000);
+    const when = left < 3600 ? `через ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`
+      : "о " + new Date(next.due * 1000).toTimeString().slice(0, 5);
+    foot = `⏰ ${when} — ${next.text}`;
+  }
+  if ($("foot").textContent !== foot) $("foot").textContent = foot;
+  const h = d.getHours();
+  const night = (h >= 23 || h < 7) && Date.now() - lastActive > 120000;
+  if (night !== sleeping) {
+    sleeping = night;
+    $("night").style.opacity = night ? 0.6 : 0;
+    $("zzz").className = night ? "on" : "";
+  }
+}
+setInterval(clockTick, 1000);
+clockTick();
+
+function loop() {
+  const now = performance.now();
+  const sp = speechTick(now);
+  faceTick(now, Q.talking, sp.level);
+  textTick(now, sp.typed);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ------------------------------------------------ події з сервера
+function handle(m) {
+  const now = performance.now();
+  if (!m.replay && !["widget", "timers", "theme"].includes(m.t)) {
+    lastActive = Date.now();
+    if (sleeping) clockTick();
+  }
+  switch (m.t) {
+    case "theme": setTheme(m.theme | 0); break;
+    case "widget": $("weather").textContent = [m.weather, m.desc].filter(Boolean).join(" · "); break;
+    case "timers": timers = m.items || []; clockTick(); break;
+    case "listen":
+      resetSpeech(); S.pending = null; S.heard = ""; S.mode = "listen"; setMood("listening");
+      if (now - F.lastHair > 20000) hairFix();  // не частіше ніж раз на 20 с, як на Cardputer
+      break;
+    case "think": S.mode = "think"; setMood("thinking"); break;
+    case "heard": S.heard = m.text; S.heardSize = fitSize(m.text); S.mode = "think"; setMood("thinking"); break;
+    case "idle": S.mode = "idle"; setMood("neutral"); break;
+    case "say": {
+      const said = { text: m.text, mood: m.mood || "calm", who: m.radio ? "РАДІО" : "НАОМІ" };
+      if (m.replay) { Object.assign(S, said); S.size = fitSize(S.text); break; }
+      resetSpeech();
+      S.pending = said;  // показуємо, коли зазвучить
+      break;
+    }
+    case "env":
+      if (S.pending) { Object.assign(S, S.pending); S.pending = null; S.mode = "say"; S.size = fitSize(S.text); }
+      addSeg(m.env, m.text);
+      break;
+    case "end":
+      if (S.pending) { Object.assign(S, S.pending); S.pending = null; S.size = fitSize(S.text); }  // тихий режим
+      if (Q.talking) Q.ending = true; else finishSpeech();
+      break;
+    case "alarm":
+      S.mode = "idle"; S.who = "НАГАДУВАННЯ"; S.text = m.text; S.size = fitSize(m.text); setMood("happy", 3000);
+      break;
+    case "emote":
+      if (m.emote === "wink") F.winkUntil = now + 550;
+      else if (m.emote === "smile") setMood("happy", 2500);
+      else if (m.emote === "hair") hairFix();
+      break;
+    case "air":
+      $("alert").className = m.on ? "on" : "";
+      $("alert").textContent = m.on ? `ПОВІТРЯНА ТРИВОГА · ${m.region} · пройди в укриття` : "";
+      $("frame").className = m.on ? "air" : "";
+      if (!m.replay) setMood(m.on ? "worried" : "happy", m.on ? 60000 : 3000);
+      break;
+  }
+}
+
+function notice(text) { S.mode = "idle"; S.who = "НАОМІ"; S.text = text; S.size = fitSize(text); }
+
+// ------------------------------------------------ з'єднання: ключ — у #хеші адреси, на сервер іде першим повідомленням
+let pageVer = null, attempt = 0;
+function connect() {
+  const key = decodeURIComponent(location.hash.slice(1));
+  if (!key) { notice("Додай ключ екрана в кінець адреси: …/screen#КЛЮЧ"); return; }
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/screen/ws");
+  let ping = 0;
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ key }));
+    ping = setInterval(() => { if (ws.readyState === 1) ws.send("{}"); }, 50000);
+  };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.t !== "assets") return handle(m);
+    if (pageVer && m.page !== pageVer) return location.reload();  // сторінку оновили на сервері
+    pageVer = m.page; A = m; setTheme(theme); attempt = 0;
+    $("dot").className = "on";
+    if (S.text === "Підключаюсь…") notice("Привіт! Затисни кнопку на Cardputer і говори — я тут.");
+  };
+  ws.onclose = (e) => {
+    clearInterval(ping);
+    $("dot").className = "";
+    if (e.code === 4401) { notice("Ключ екрана не підходить — перевір адресу."); setTimeout(connect, 60000); return; }
+    setTimeout(connect, Math.min(30000, 2000 * ++attempt));  // сервер прокидається або перезапускається
+  };
+}
+addEventListener("hashchange", () => location.reload());
+S.size = fitSize(S.text);
+connect();
+</script>
+</body>
+</html>

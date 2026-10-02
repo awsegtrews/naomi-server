@@ -7,6 +7,7 @@ WORKDIR $HOME/app
 COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 COPY --chown=user *.py ./
+COPY --chown=user static ./static
 EXPOSE 7860
 # Render передає порт у змінній PORT
 CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860} --proxy-headers --forwarded-allow-ips "*"

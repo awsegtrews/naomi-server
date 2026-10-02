@@ -14,6 +14,7 @@ HERE = Path(__file__).resolve().parent
 REPO = os.environ.get("NAOMI_DATA_REPO", "")
 TOKEN = os.environ.get("HF_TOKEN", "")
 FILES = ["memory.json", "notes.json", "reminders.json"]
+READ_ONLY = ["screen_assets.json"]  # портрет для великого екрана: лише в приватному сховищі, не в публічному коді
 DELAY = 15  # секунд: кілька змін поспіль — одне збереження
 
 _pending: set[str] = set()
@@ -30,7 +31,7 @@ def restore() -> None:
     if not enabled():
         return
     from huggingface_hub import hf_hub_download
-    for name in FILES:
+    for name in FILES + READ_ONLY:
         try:
             hf_hub_download(REPO, name, repo_type="dataset", token=TOKEN, local_dir=str(HERE))
             log.info("відновлено %s", name)
