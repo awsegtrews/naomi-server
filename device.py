@@ -29,6 +29,7 @@ from audio import SAMPLE_RATE, mulaw_to_pcm16, normalize, pcm16_to_mulaw, pcm16_
 from brains import CITY, OWNER_VOC, Brain
 from radio import STATIONS, RadioStream
 from screens import SCREENS, envelope
+import tts_gemini
 from weather import short as short_weather
 from pc_link import HomeLink
 from textutil import clean
@@ -37,6 +38,7 @@ log = logging.getLogger("naomi.device")
 
 FRAME = 1024              # 64 мс звуку
 WINDOW = 12 * 1024        # стільки байтів може бути «в дорозі» без підтвердження (буфер пристрою 32 КБ)
+LIVE_PREBUFFER = 4800     # 0.3 с живого голосу в запасі перед стартом
 MAX_RECORD = SAMPLE_RATE * 60
 GREET_EVERY = 2 * 3600    # вітатися голосом не частіше ніж раз на 2 години
 _last_greeting = 0.0
@@ -336,9 +338,47 @@ class DeviceSession:
         except TimeoutError:
             log.warning("тривогу не дограно — пристрій зник")
 
+    async def _send_frame(self, chunk: bytes) -> None:
+        """Аудіокадр на пристрій, не більше WINDOW байт «у дорозі» (пристрій підтверджує відтворене)."""
+        while self.sent - self.acked >= WINDOW:
+            self.acked_event.clear()
+            await asyncio.wait_for(self.acked_event.wait(), timeout=15)
+        await self.ws.send_bytes(chunk)
+        self.sent += len(chunk)
+
+    async def _speak_live(self, spoken: str, estimate: int, mood: str) -> None:
+        """Живий голос Gemini потоком. Unavailable — якщо не прозвучало нічого (тоді говорить Edge)."""
+        pending, started = bytearray(), False
+        try:
+            async for pcm in tts_gemini.stream(spoken, self.brain.style, mood):
+                SCREENS.send({"t": "env", "env": envelope(pcm)})
+                pending += pcm16_to_mulaw(pcm)
+                if not started:
+                    if len(pending) < LIVE_PREBUFFER:  # трохи запасу, щоб не заїкалось на початку
+                        continue
+                    started = True
+                    await self.send({"t": "audio", "bytes": estimate, "rate": SAMPLE_RATE})
+                    self.sent = self.acked = 0
+                while len(pending) >= FRAME:
+                    await self._send_frame(bytes(pending[:FRAME]))
+                    del pending[:FRAME]
+        except tts_gemini.Unavailable:
+            if not started:
+                raise
+            log.warning("живий голос обірвався — договорюю, що встигло")
+        if not started:  # коротка фраза, менша за запас
+            if not pending:
+                raise tts_gemini.Unavailable("порожня відповідь")
+            await self.send({"t": "audio", "bytes": len(pending), "rate": SAMPLE_RATE})
+            self.sent = self.acked = 0
+        if pending:
+            await self._send_frame(bytes(pending))
+        await self.send({"t": "total", "bytes": self.sent})
+
     async def speak(self, text: str, mood: str = "calm", force_voice: bool = False) -> None:
-        """Озвучує по реченнях: перше речення звучить, поки синтезуються наступні."""
-        text = clean(text) or "…"
+        """Озвучує: живим голосом Gemini (потоком) або Edge по реченнях — перше звучить, поки синтезуються інші."""
+        spoken = text
+        text = clean(tts_gemini.strip_tags(text)) or "…"
         log.info("говорю [%s]: %s", mood, text)
         SCREENS.send({"t": "say", "text": text, "mood": mood}, remember="say")
         if self.mute and not force_voice:  # тихий режим — лише текст
@@ -346,6 +386,15 @@ class DeviceSession:
             SCREENS.send({"t": "end"})
             return
         await self.send({"t": "say", "text": text, "mood": mood})
+        if tts_gemini.enabled(self.brain.style):
+            try:
+                await self._speak_live(tts_gemini.prepare(spoken) or text, int(len(text) * SAMPLE_RATE / 14), mood)
+                await self.send({"t": "end"})
+                SCREENS.send({"t": "end"})
+                await self.send({"t": "status", "pc": self.home.online("pc")})
+                return
+            except tts_gemini.Unavailable as e:
+                log.warning("живий голос недоступний (%s) — говорю звичайним", str(e)[:200])
         parts = [p for p in re.split(r"(?<=[.!?…])\s+", text) if p.strip()] or [text]
         jobs = [asyncio.create_task(synthesize(p)) for p in parts]
         # орієнтовна тривалість (~14 символів/с), точну надішлемо, коли синтез завершиться
@@ -359,12 +408,7 @@ class DeviceSession:
                 if job is jobs[-1]:
                     await self.send({"t": "total", "bytes": self.sent + len(ulaw)})
                 for i in range(0, len(ulaw), FRAME):
-                    while self.sent - self.acked >= WINDOW:
-                        self.acked_event.clear()
-                        await asyncio.wait_for(self.acked_event.wait(), timeout=15)
-                    chunk = ulaw[i:i + FRAME]
-                    await self.ws.send_bytes(chunk)
-                    self.sent += len(chunk)
+                    await self._send_frame(ulaw[i:i + FRAME])
         finally:
             for job in jobs:
                 job.cancel()
