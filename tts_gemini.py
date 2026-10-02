@@ -1,7 +1,10 @@
 """Живий голос Наомі — Gemini TTS (безкоштовний ключ Google AI Studio): емоції, звуки <pff>, <giggle>…
 
 Говорить потоком: перший звук ~1.5 с, далі синтез удвічі швидший за мовлення. Gemini віддає PCM 24 кГц —
-переводимо в 16 кГц для Cardputer. Якщо Gemini недоступний (ліміт, мережа) — device.py говорить голосом Edge.
+переводимо в 16 кГц для Cardputer.
+
+Безкоштовно Google дає ~10 фраз на добу КОЖНІЙ моделі, тож перебираємо моделі по черзі (вичерпана
+відпочиває, скільки скаже Google), а коли вичерпано всі — device.py говорить звичайним голосом Edge.
 """
 import base64
 import json
@@ -17,10 +20,11 @@ from textutil import clean
 
 log = logging.getLogger("naomi.tts")
 KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = os.environ.get("NAOMI_TTS_MODEL", "gemini-3.8-flash-tts")
+MODELS = os.environ.get("NAOMI_TTS_MODELS", "gemini-3.8-flash-tts,gemini-3.8-flash-lite-tts,"
+                        "gemini-3.1-flash-tts-preview,gemini-2.5-flash-preview-tts").split(",")
 VOICE = os.environ.get("NAOMI_GEMINI_VOICE", "Leda")
 USE_FOR = os.environ.get("NAOMI_GEMINI_FOR", "all")  # all — завжди, tsundere — лише для цундере, none — ніколи
-URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:streamGenerateContent"
+NEW_API = ("gemini-3.8",)  # ці моделі розуміють speech_metadata.style і звуки <pff>; старші — опис стилю словами
 
 # звуки, які модель може вставляти у відповідь (решту тегів прибираємо)
 SOUNDS = ["pff", "tsk", "giggle", "chuckle", "laugh", "sigh", "gasp", "phew", "groan", "grr", "whispers",
@@ -44,16 +48,22 @@ STYLES = {  # характер -> настрій відповіді -> як го
     },
 }
 
-_cooldown_until = 0.0  # після ліміту якийсь час говоримо звичайним голосом, щоб не чекати марно
+_resting: dict[str, float] = {}  # модель -> до коли не пробувати (вичерпала ліміт)
 
 
 class Unavailable(Exception):
     pass
 
 
+class _ModelRefused(Exception):
+    pass
+
+
 def enabled(style: str) -> bool:
-    return (bool(KEY) and (USE_FOR == "all" or (USE_FOR == "tsundere" and style == "tsundere"))
-            and time.time() >= _cooldown_until)
+    if not KEY or not (USE_FOR == "all" or (USE_FOR == "tsundere" and style == "tsundere")):
+        return False
+    now = time.time()
+    return any(now >= _resting.get(m, 0) for m in MODELS)
 
 
 def strip_tags(text: str) -> str:
@@ -77,6 +87,31 @@ def prepare(text: str) -> str:
 def style_for(style: str, mood: str) -> str:
     table = STYLES.get(style, STYLES["normal"])
     return table.get(mood, table["default"]) + "; speaking Ukrainian"
+
+
+def _body(model: str, text: str, how: str) -> dict:
+    if model.startswith(NEW_API):
+        return {"contents": [{"role": "user", "parts": [{"text": text, "speech_metadata": {"style": how}}]}],
+                "generationConfig": {"responseModalities": ["AUDIO"],
+                                     "speechConfig": {"voiceConfig": {"voice": VOICE}}}}
+    return {"contents": [{"role": "user", "parts": [{"text": f"Say it as {how}: {strip_tags(text)}"}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"],
+                                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}}}}
+
+
+def _rest(model: str, status: int, detail: str) -> None:
+    """Скільки моделі відпочивати: Google сам підказує retryDelay; невідома помилка — кілька хвилин."""
+    seconds = 300
+    try:
+        for d in json.loads(detail).get("error", {}).get("details", []):
+            if "retryDelay" in d:
+                seconds = int(float(d["retryDelay"].rstrip("s"))) + 60
+    except (ValueError, AttributeError):
+        pass
+    if status == 400:  # модель не приймає такий запит — не мучимо її до перезапуску
+        seconds = 24 * 3600
+    _resting[model] = time.time() + seconds
+    log.warning("%s: %s — відпочиває %d хв", model, status, seconds // 60)
 
 
 class _Resampler:
@@ -106,32 +141,44 @@ class _Resampler:
         return np.clip(out, -32768, 32767).astype(np.int16)
 
 
-async def stream(text: str, style: str, mood: str):
-    """Віддає PCM16 16 кГц шматками, щойно Gemini їх генерує. Unavailable — якщо не вдалося."""
-    global _cooldown_until
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": text, "speech_metadata": {"style": style_for(style, mood)}}]}],
-        "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"voice": VOICE}}},
-    }
+async def _stream_model(client: httpx.AsyncClient, model: str, text: str, how: str):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent"
     rs = _Resampler()
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-            async with client.stream("POST", URL, params={"alt": "sse"}, headers={"x-goog-api-key": KEY},
-                                     json=body) as r:
-                if r.status_code != 200:
-                    detail = (await r.aread())[:400].decode(errors="replace")
-                    if r.status_code == 429:  # ліміт: денний — чекаємо довше
-                        _cooldown_until = time.time() + (3 * 3600 if "PerDay" in detail else 600)
-                    raise Unavailable(f"{r.status_code}: {detail}")
-                async for line in r.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    d = json.loads(line[5:])
-                    for p in ((d.get("candidates") or [{}])[0].get("content") or {}).get("parts", []):
-                        data = (p.get("inlineData") or {}).get("data")
-                        if data:
-                            out = rs.feed(np.frombuffer(base64.b64decode(data), "<i2"))
-                            if len(out):
-                                yield out
-    except httpx.HTTPError as e:
-        raise Unavailable(type(e).__name__) from e
+    async with client.stream("POST", url, params={"alt": "sse"}, headers={"x-goog-api-key": KEY},
+                             json=_body(model, text, how)) as r:
+        if r.status_code != 200:
+            detail = (await r.aread()).decode(errors="replace")
+            _rest(model, r.status_code, detail)
+            raise _ModelRefused(f"{model} {r.status_code}")
+        async for line in r.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            d = json.loads(line[5:])
+            for p in ((d.get("candidates") or [{}])[0].get("content") or {}).get("parts", []):
+                data = (p.get("inlineData") or {}).get("data")
+                if data:
+                    out = rs.feed(np.frombuffer(base64.b64decode(data), "<i2"))
+                    if len(out):
+                        yield out
+
+
+async def stream(text: str, style: str, mood: str):
+    """Віддає PCM16 16 кГц шматками, щойно Gemini їх генерує. Unavailable — якщо жодна модель не змогла."""
+    how, refused = style_for(style, mood), []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        for model in MODELS:
+            if time.time() < _resting.get(model, 0):
+                continue
+            started = False
+            try:
+                async for pcm in _stream_model(client, model, text, how):
+                    started = True
+                    yield pcm
+                return
+            except _ModelRefused as e:
+                refused.append(str(e))  # нічого не прозвучало — пробуємо наступну модель
+            except (httpx.HTTPError, json.JSONDecodeError) as e:
+                if started:
+                    raise Unavailable(f"{model} обірвався: {type(e).__name__}") from e
+                refused.append(f"{model} {type(e).__name__}")
+    raise Unavailable("; ".join(refused) or "усі моделі відпочивають")
