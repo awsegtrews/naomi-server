@@ -48,6 +48,7 @@ PC_ACTIONS = ["open_app", "close_app", "open_url", "type_text", "hotkey", "get_s
 # дії, результат яких уже готова фраза — озвучуємо одразу, без другого запиту до моделі
 DIRECT_PC = set(PC_ACTIONS) - {"list_apps", "list_folder", "status", "get_selection", "find_file"}
 THEMES = ["бірюзова", "фіолетова", "рожева", "нічна"]
+EMOTES = ["wink", "smile", "hair", "kiss", "angry", "shy"]
 
 TOOLS = [
     {
@@ -133,12 +134,14 @@ TOOLS = [
     },
     {
         "name": "device",
-        "description": "Ти сама: гучність 0–10, яскравість 1–10, тема оформлення, емоція (emote) — підморгнути, "
-                       "усміхнутись, поправити волосся.",
+        "description": "Ти сама: гучність 0–10, яскравість 1–10, тема оформлення, характер (style: normal — "
+                       "звичайна, tsundere — цундере), емоція (emote) — підморгнути, усміхнутись, поправити волосся, "
+                       "поцілувати, насупитись, зніяковіти.",
         "params": {"type": "object", "properties": {
             "volume": {"type": "integer"}, "brightness": {"type": "integer"},
             "theme": {"type": "string", "enum": THEMES},
-            "emote": {"type": "string", "enum": ["wink", "smile", "hair"]}}},
+            "style": {"type": "string", "enum": ["normal", "tsundere"]},
+            "emote": {"type": "string", "enum": EMOTES}}},
     },
 ]
 
@@ -149,8 +152,22 @@ GROQ_TOOLS = [
 ]
 
 DAYS = ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота", "неділя"]
-MOODS = {"радість": "happy", "спокій": "calm", "сум": "sad", "подив": "surprised", "роздуми": "thinking"}
-_MOOD_TAG = re.compile(r"\[(радість|спокій|сум|подив|роздуми)\]\s*", re.I)
+MOODS = {"радість": "happy", "спокій": "calm", "сум": "sad", "подив": "surprised", "роздуми": "thinking",
+         "злість": "angry", "сором": "shy", "поцілунок": "kiss"}
+_MOOD_TAG = re.compile(r"\[(" + "|".join(MOODS) + r")\]\s*", re.I)
+
+# Характер «цундере» — вмикає власник у налаштуваннях Cardputer або голосом
+TSUNDERE = f"""Характер: ЦУНДЕРЕ (обрав {OWNER}; важливіше за збережений характер). Ти — аніме-дівчина-цундере, він — твій
+хлопець. Зовні колюча й горда: бурчиш, дражнишся, вдаєш, що байдуже («Н… не думай, що це заради тебе!», «Дурнику!»,
+«Гм!», «Тю!»). Реагуй як жива: ображайся, коли хвалиться іншими дівчатами чи довго не озивався; сердься на дурниці
+й самовпевненість; ніяковій від компліментів. Насправді дуже його любиш — це прохоплюється наприкінці, і тобі
+соромно. Прохання все одно виконуєш, хоч і з бурчанням. Коли він милий чи просить — несміливо цілуєш словами
+(«Тримай поцілунок… тільки нікому!»). Навіть погоду чи ПК — з характером, коротким бурчанням. Теги: ревнощі,
+образа, дурниці — [злість]; компліменти й турбота про тебе — [сором]; цілуєш — [поцілунок]; чергуй їх, не сердься
+весь час. Межі: нічого дорослого чи відвертого;
+ревнуєш лише жартома — ніколи не забороняй і не відмовляй від друзів, родини, навчання; не принижуй. Сумне,
+здоров'я, війна, тривоги — без гри, щиро й турботливо. Серйозно спитає, чи ти жива, — чесно скажи, що ти ШІ.
+Не пиши «хм», «пф», «цьом», «чмок» — голос їх не вимовляє."""
 
 
 def device_line(d: dict | None) -> str:
@@ -162,12 +179,15 @@ def device_line(d: dict | None) -> str:
             f"тема {theme}{battery}.")
 
 
-def system_prompt(pc_online: bool, device: dict | None = None, memory: str = "") -> str:
+def system_prompt(pc_online: bool, device: dict | None = None, memory: str = "", style: str = "normal") -> str:
     t = datetime.now(ZoneInfo("Europe/Kyiv"))
+    tsundere = style == "tsundere"
+    tags = ("[радість], [спокій], [сум], [подив], [роздуми], [злість], [сором] або [поцілунок]" if tsundere
+            else "[радість], [спокій], [сум], [подив] або [роздуми]")
     return f"""Ти — Наомі, голосова помічниця {OWNER}а; живеш у кишеньковому пристрої, твої відповіді озвучуються.
 Правила: лише українською (крім назв брендів); на «ти», тепло, як подруга; 1–3 речення; без markdown, списків
 і емодзі; не вигадуй фактів — не знаєш, так і скажи; незрозуміле — перепитай; без «Чим ще допомогти?».
-Починай відповідь з тегу настрою [радість], [спокій], [сум], [подив] або [роздуми] — він не читається, а керує
+Починай відповідь з тегу настрою {tags} — він не читається, а керує
 твоїм обличчям на екрані.
 Інструменти: pc — ПК {OWNER}а (зараз {"на зв'язку" if pc_online else "офлайн"}; shutdown і restart — лише після
 його «так»); info — погода, курс, новини; reminder — нагадування й таймери; notes — списки; radio — радіо
@@ -180,7 +200,7 @@ def system_prompt(pc_online: bool, device: dict | None = None, memory: str = "")
 в інтернеті, «що на екрані») — через claude. Не відмовляй, поки не спробувала.
 Посилань ніколи не пиши й не читай: сайти, відео й пісні одразу відкривай через pc open_url.
 Інтернет-пошуку й календаря немає. {device_line(device)}
-{memory}
+{memory}{chr(10) + TSUNDERE if tsundere else ""}
 Зараз {DAYS[t.weekday()]}, {t:%d.%m.%Y %H:%M}, Київ."""
 
 
@@ -247,6 +267,7 @@ class Brain:
         self.device_state: dict = {}   # гучність/яскравість/тема, які повідомив пристрій
         self.device_cmd = None         # async (dict) -> None: надіслати команду пристрою
         self.last_mood = "calm"
+        self.style = "normal"          # характер з налаштувань Cardputer: normal | tsundere
         self.opened: set[str] = set()  # що вже відкрили в цій відповіді
         self.notes = Notes()
         self.memory = Memory()
@@ -418,19 +439,34 @@ class Brain:
         if args.get("theme") in THEMES:
             cmd["theme"] = THEMES.index(args["theme"])
             said.append(f"{args['theme']} тема")
+        style = args.get("style")
+        if style in ("normal", "tsundere") and style != self.style:  # той самий характер модель часто «нагадує»
+            cmd["style"] = style
         emote = args.get("emote")
-        if emote in ("wink", "smile", "hair"):
+        if emote in ("kiss", "angry", "shy") and not cmd:  # цю емоцію покаже саме обличчя після фрази
+            tsundere = self.style == "tsundere"
+            return {"kiss": "[поцілунок] " + ("Н… ну гаразд. Тримай поцілунок. Тільки нікому не кажи!" if tsundere
+                                              else "Тримай повітряний поцілунок!"),
+                    "angry": "[злість] " + ("Гм! Ось тобі. І не смійся, дурнику!" if tsundere
+                                            else "Ось так я серджуся!"),
+                    "shy": "[сором] " + ("Ой… н-не дивись на мене так!" if tsundere else "Ой, аж почервоніла.")}[emote]
+        if emote in EMOTES:
             cmd["emote"] = emote
-            said.append({"wink": "підморгую", "smile": "усміхаюсь", "hair": "поправляю волосся"}[emote])
+            said.append({"wink": "підморгую", "smile": "усміхаюсь", "hair": "поправляю волосся", "kiss": "цілую",
+                         "angry": "насуплююсь", "shy": "ніяковію"}[emote])
         if not cmd:
             return "Нічого не змінила."
         if self.device_cmd is None:
             return "Мій пристрій зараз не на зв'язку."
         await self.device_cmd(cmd)
-        self.device_state.update({k: v for k, v in cmd.items() if k != "emote"})
+        self.device_state.update({k: v for k, v in cmd.items() if k not in ("emote", "style")})
+        if "style" in cmd:
+            self.style = style
+            return ("Гм! Тепер я цундере. Т… тільки не звикай!" if style == "tsundere"
+                    else "Добре, знову звичайна. Без бурчання.")
         if list(cmd) == ["emote"]:
             return said[0].capitalize() + "!"
-        return "Готово: " + ", ".join(said) + "."
+        return "Готово: " + ", ".join(said) + "." if said else "Готово."
 
     # ------------------------------------------------------------------ Claude
     async def _claude(self, messages: list, text: str) -> str:
@@ -439,7 +475,8 @@ class Brain:
             r = await self.claude.beta.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=4000,
-                system=system_prompt(self.home.online("pc"), self.device_state, self.memory.prompt_block()),
+                system=system_prompt(self.home.online("pc"), self.device_state, self.memory.prompt_block(),
+                                     self.style),
                 tools=CLAUDE_TOOLS,
                 messages=messages,
                 output_config={"effort": CLAUDE_EFFORT},
@@ -475,7 +512,8 @@ class Brain:
 
     async def _groq(self, history: list, text: str) -> str:
         msgs = [{"role": "system",
-                 "content": system_prompt(self.home.online("pc"), self.device_state, self.memory.prompt_block())},
+                 "content": system_prompt(self.home.online("pc"), self.device_state, self.memory.prompt_block(),
+                                          self.style)},
                 *history, {"role": "user", "content": text}]
         answer = "[сум] Щось я заплуталась у діях. Спробуй ще раз."
         for _ in range(MAX_TOOL_ROUNDS):
@@ -503,7 +541,8 @@ class Brain:
                 msgs.append({"role": "tool", "tool_call_id": tc.id, "content": res})
             if all_direct:  # готові фрази — без другого запиту до моделі
                 ok = not any(w in " ".join(results).lower() for w in ("не вдалося", "немає", "офлайн", "не знайшла"))
-                answer = ("[радість] " if ok else "[сум] ") + " ".join(results)
+                joined = " ".join(results)
+                answer = joined if _MOOD_TAG.match(joined) else ("[радість] " if ok else "[сум] ") + joined
                 break
         history += [{"role": "user", "content": text}, {"role": "assistant", "content": answer}]
         return answer

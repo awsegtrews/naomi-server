@@ -1,6 +1,7 @@
 """Звук: розпаковка µ-law від Cardputer, WAV для Whisper, голос Наомі (Edge TTS)."""
 import io
 import os
+import re
 import wave
 
 import edge_tts
@@ -38,10 +39,17 @@ def pcm16_to_wav(pcm: np.ndarray, rate: int = SAMPLE_RATE) -> bytes:
     return buf.getvalue()
 
 
+# вигуки, які синтезатор читає по літерах («Хм» -> «Ха-ем»), — заміняємо на ті, що звучать
+_INTERJECTIONS = [(re.compile(r"\b([Хх])м+\b"), lambda m: "Гм" if m.group(1) == "Х" else "гм"),
+                  (re.compile(r"\b([Пп])ф+\b"), lambda m: "Тю" if m.group(1) == "П" else "тю")]
+
+
 async def synthesize(text: str) -> bytes:
     """Текст -> сирий PCM 16 біт, 16 кГц, моно (саме те, що грає Cardputer)."""
     if not text.strip():
         return b""
+    for pattern, repl in _INTERJECTIONS:
+        text = pattern.sub(repl, text)
     mp3 = bytearray()
     async for chunk in edge_tts.Communicate(text, VOICE, rate=VOICE_RATE).stream():
         if chunk["type"] == "audio":

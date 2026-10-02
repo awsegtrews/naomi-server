@@ -1,14 +1,15 @@
 """Сесія Cardputer по WebSocket /device.
 
 Пристрій -> сервер:
-  {"t":"hello","brain":"groq"}            при підключенні
+  {"t":"hello","brain":"groq","style":"normal|tsundere"}   при підключенні (style — характер)
+  {"t":"style","style":...}               змінили характер у налаштуваннях
   {"t":"start","brain":"groq"}            почав говорити (перебиває відповідь, якщо вона звучить)
   <бінарні кадри>                          голос: µ-law, 16 кГц, моно
   {"t":"stop"}                             відпустив кнопку — обробляй
   {"t":"cancel"} / {"t":"reset"}           скасувати / нова розмова
   {"t":"ack","b":N}                        відтворив ще N байт (керування потоком)
 Сервер -> пристрій:
-  {"t":"heard","text":...}  {"t":"say","text":...,"mood":"happy|calm|sad|surprised|thinking"}
+  {"t":"heard","text":...}  {"t":"say","text":...,"mood":"happy|calm|sad|surprised|thinking|angry|shy|kiss"}
   {"t":"cmd","volume":0..10,"bright":1..10,"theme":0..3}   {"t":"alarm","text":...} (+ голос)
   {"t":"audio","bytes":≈N,"rate":16000} + бінарні кадри µ-law (+ {"t":"total","bytes":N}) + {"t":"end"}
   {"t":"error","text":...}  {"t":"status","pc":true|false}
@@ -41,11 +42,16 @@ GREET_EVERY = 2 * 3600    # вітатися голосом не частіше 
 _last_greeting = 0.0
 
 
-async def greeting() -> str:
+async def greeting(tsundere: bool = False) -> str:
     h = datetime.now(ZoneInfo("Europe/Kyiv")).hour
     part = ("Доброго ранку" if 5 <= h < 11 else "Доброго дня" if h < 17 else
             "Доброго вечора" if h < 23 else "Доброї ночі")
     text = f"{part}, {OWNER_VOC}! Я на зв'язку."
+    if tsundere:
+        text = (f"Гм, доброго ранку, {OWNER_VOC}. Н… не те щоб я чекала, поки ти прокинешся!" if 5 <= h < 11 else
+                f"О, нарешті згадав про мене! Ну… привіт, {OWNER_VOC}." if h < 17 else
+                f"Де ти пропадав, {OWNER_VOC}? Н… не те щоб я сумувала!" if h < 23 else
+                "Чого не спиш, дурнику? Ну… я тут, якщо що.")
     if 5 <= h < 11:  # зранку — одразу погода
         try:
             temp, desc = await short_weather(CITY)
@@ -157,7 +163,8 @@ class DeviceSession:
                 self.speak(f"У мене лишилось {level} відсотків заряду. Постав мене, будь ласка, на зарядку.", "sad"))
 
     async def greet(self) -> None:
-        await self.speak(await greeting(), "happy")
+        tsundere = self.brain.style == "tsundere"
+        await self.speak(await greeting(tsundere), "shy" if tsundere else "happy")
 
     async def ask_confirm(self, text: str, timeout: float = 60) -> bool:
         self.confirm_id += 1
@@ -208,6 +215,11 @@ class DeviceSession:
 
     async def on_text(self, m: dict) -> None:
         t = m.get("t")
+        if m.get("style") in ("normal", "tsundere"):  # характер з налаштувань Cardputer
+            self.brain.style = m["style"]
+        if t == "style":
+            log.info("характер: %s", self.brain.style)
+            return
         if t == "confirm_reply":
             fut = self.confirms.pop(int(m.get("id", -1)), None)
             if fut and not fut.done():
